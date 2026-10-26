@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scanner Barcode Kehadiran - UPTD SDN 2 BONGAS</title>
+  <style>
+    :root{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#173153;background:#f3f7fc}
+    *{box-sizing:border-box}body{margin:0;padding:22px}main{max-width:760px;margin:0 auto;background:white;border:1px solid #dbe5f2;border-radius:20px;padding:22px;box-shadow:0 14px 40px #17315312}
+    h1{font-size:1.45rem;margin:0 0 4px;color:#17457e}p{line-height:1.5}.muted{color:#62758e;font-size:.93rem}
+    .actions{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0}button{border:0;border-radius:10px;padding:12px 16px;font-weight:700;font-size:1rem;cursor:pointer}
+    #start{background:#2165df;color:white}#stop{background:#e9eff7;color:#254366}button:disabled{opacity:.5;cursor:not-allowed}
+    #reader{width:100%;min-height:280px;overflow:hidden;border:1px dashed #afc6e4;border-radius:14px;background:#f8fbff;padding:10px}
+    #status{margin:14px 0;padding:12px;border-radius:10px;background:#eef4fc;color:#284b76}#last{font-weight:700;color:#167347;word-break:break-word}
+    .warn{color:#9e3140;background:#fff0f1!important}.foot{border-top:1px solid #e1e8f1;margin-top:18px;padding-top:12px}
+    @media(max-width:560px){body{padding:10px}main{padding:15px;border-radius:14px}#reader{min-height:220px}}
+  </style>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+  <main>
+    <h1>Scanner Barcode Kehadiran</h1>
+    <div class="muted">UPTD SDN 2 BONGAS · Tahun Pelajaran 2026/2027</div>
+    <p>Halaman ini hanya membuka kamera dan membaca barcode Code 128. Kode yang terbaca dikirim kembali ke tab aplikasi Apps Script yang membukanya; halaman ini tidak menyimpan data siswa atau password.</p>
+    <div id="status" role="status">Memeriksa koneksi ke aplikasi utama…</div>
+    <div class="actions">
+      <button id="start" type="button" disabled>Aktifkan Kamera</button>
+      <button id="stop" type="button" disabled>Berhenti</button>
+    </div>
+    <div id="reader"><p class="muted">Tekan “Aktifkan Kamera” untuk memulai.</p></div>
+    <p>Barcode terakhir: <span id="last">Belum ada</span></p>
+    <div class="foot muted">Jika kamera gagal dibuka, pastikan halaman ini menggunakan HTTPS, browser mendapat izin kamera, dan tab aplikasi kehadiran masih terbuka. Setelah pemindaian, periksa hasilnya di aplikasi utama.</div>
+  </main>
+<script>
+(() => {
+  'use strict';
+  const params = new URLSearchParams(location.search);
+  const returnOrigin = params.get('returnOrigin') || '';
+  const statusNode = document.getElementById('status');
+  const startButton = document.getElementById('start');
+  const stopButton = document.getElementById('stop');
+  const lastNode = document.getElementById('last');
+  let scanner = null;
+  let scanning = false;
+  let lastCode = '';
+  let lastSentAt = 0;
+
+  function allowedParentOrigin(origin) {
+    try {
+      const url = new URL(origin);
+      return url.protocol === 'https:' && (url.hostname === 'script.google.com' || url.hostname === 'script.googleusercontent.com') && url.origin === origin;
+    } catch (e) { return false; }
+  }
+  function showStatus(text, error = false) {
+    statusNode.textContent = text;
+    statusNode.classList.toggle('warn', error);
+  }
+  function sendToApp(type, fields = {}) {
+    if (!window.opener || window.opener.closed) {
+      showStatus('Tab aplikasi utama tidak ditemukan. Tutup halaman ini dan buka scanner dari aplikasi kehadiran.', true);
+      return false;
+    }
+    window.opener.postMessage(Object.assign({ type }, fields), returnOrigin);
+    return true;
+  }
+  async function stopCamera(notify = true) {
+    const oldScanner = scanner;
+    scanner = null;
+    if (oldScanner) {
+      try { if (oldScanner.isScanning) await oldScanner.stop(); } catch (e) { /* Kamera mungkin sudah berhenti. */ }
+      try { await oldScanner.clear(); } catch (e) { /* Reader mungkin sudah dibersihkan. */ }
+    }
+    scanning = false;
+    startButton.disabled = !(window.opener && !window.opener.closed);
+    stopButton.disabled = true;
+    document.getElementById('reader').innerHTML = '<p class="muted">Kamera berhenti. Tekan “Aktifkan Kamera” untuk memulai lagi.</p>';
+    showStatus('Kamera berhenti.');
+    if (notify) sendToApp('ATTENDANCE_SCANNER_STOPPED');
+  }
+  async function startCamera() {
+    if (!allowedParentOrigin(returnOrigin) || !window.opener || window.opener.closed) {
+      showStatus('Halaman ini harus dibuka melalui tombol Scanner Kamera pada aplikasi kehadiran. Tutup tab ini lalu buka kembali dari aplikasi utama.', true);
+      return;
+    }
+    if (typeof window.Html5Qrcode !== 'function' || !window.Html5QrcodeSupportedFormats) {
+      showStatus('Library scanner tidak berhasil dimuat. Periksa koneksi internet lalu muat ulang halaman ini.', true);
+      sendToApp('ATTENDANCE_SCANNER_ERROR', { message: 'Library barcode tidak termuat pada halaman scanner eksternal.' });
+      return;
+    }
+    startButton.disabled = true;
+    stopButton.disabled = false;
+    showStatus('Meminta izin kamera…');
+    try {
+      scanner = new Html5Qrcode('reader', {
+        formatsToSupport: [Html5QrcodeSupportedFormats.CODE_128],
+        verbose: false
+      });
+      await scanner.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 300, height: 110 }, aspectRatio: 1.5 },
+        (decodedText) => {
+          const code = String(decodedText || '').trim().toUpperCase();
+          if (!code) return;
+          const now = Date.now();
+          if (code === lastCode && now - lastSentAt < 2200) return;
+          lastCode = code;
+          lastSentAt = now;
+          lastNode.textContent = code;
+          showStatus('Barcode terbaca; mengirim kode ke aplikasi utama…');
+          if (sendToApp('ATTENDANCE_BARCODE', { code })) showStatus('Kode dikirim. Lanjutkan pindai kartu berikutnya.');
+        },
+        () => { /* Ketidakcocokan frame selama pencarian barcode adalah normal. */ }
+      );
+      scanning = true;
+      startButton.disabled = true;
+      stopButton.disabled = false;
+      showStatus('Kamera aktif. Arahkan barcode Code 128 pada kartu siswa ke area kamera.');
+      sendToApp('ATTENDANCE_SCANNER_STARTED');
+    } catch (error) {
+      await stopCamera(false);
+      const message = error && error.message ? error.message : String(error || 'Izin kamera ditolak.');
+      showStatus('Kamera gagal dibuka: ' + message + '. Periksa izin kamera browser.', true);
+      sendToApp('ATTENDANCE_SCANNER_ERROR', { message: 'Kamera scanner eksternal gagal dibuka: ' + message });
+    }
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.origin !== returnOrigin || event.source !== window.opener || !allowedParentOrigin(returnOrigin)) return;
+    if (!event.data || typeof event.data !== 'object') return;
+    if (event.data.type === 'ATTENDANCE_SCANNER_STOP') stopCamera(true);
+    if (event.data.type === 'ATTENDANCE_SCANNER_START' && !scanning) startCamera();
+  });
+
+  startButton.addEventListener('click', startCamera);
+  stopButton.addEventListener('click', () => stopCamera(true));
+
+  if (!allowedParentOrigin(returnOrigin) || !window.opener || window.opener.closed) {
+    showStatus('Buka halaman ini dari tombol “Buka Scanner Kamera” pada aplikasi kehadiran. Tab aplikasi utama harus tetap terbuka.', true);
+    startButton.disabled = true;
+  } else {
+    startButton.disabled = false;
+    showStatus('Terhubung ke aplikasi utama. Pilih “Aktifkan Kamera” untuk mulai.');
+    sendToApp('ATTENDANCE_SCANNER_READY');
+  }
+  window.addEventListener('beforeunload', () => { if (scanning) { try { if (scanner && scanner.isScanning) scanner.stop(); } catch (e) {} } });
+})();
+</script>
+</body>
+</html>
